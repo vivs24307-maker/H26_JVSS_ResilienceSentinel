@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """
-tools/sandbox.py: Hermes Agent Execution Sandbox Tool
+tools/sandbox.py - Execution Sandbox for the Hermes Agent.
 
-What it does:
-1. Takes the name of a Python package (e.g., requests==2.31.0 or platformdirs>=4.0.0).
-2. Uses the subprocess module to create a temporary virtual environment (python -m venv).
-3. Installs that package into the virtual environment.
-4. Runs the LinkWatch pytest suite within that environment.
-5. Captures terminal output (stdout/stderr) and exit code (success/failure)
-   and returns it as a JSON object or Python dictionary.
+Verifies a proposed dependency patch:
 
-Hermes Agent calls this tool to verify if a proposed dependency patch works!
+  1. Takes a package spec            (e.g. "requests==2.31.0", "pydantic>=2")
+  2. Creates a throw-away venv       (subprocess: python -m venv)
+  3. Installs the repo baseline deps, then the package spec LAST so the patch
+     always wins over any older pin in requirements.txt
+  4. Runs the LinkWatch pytest suite inside that venv
+  5. Captures stdout/stderr + exit code and returns them as a dict / JSON
+
+Usage (agent / Python):
+    from tools.sandbox import run_in_sandbox
+    result = run_in_sandbox("pydantic>=2.0.0", repo_dir=".")
+    if result["success"]: ...
+
+Usage (CLI):
+    python tools/sandbox.py --package "pydantic>=2.0.0" --repo . --json
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -25,221 +34,226 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+MAX_OUTPUT_CHARS = 20_000  # keep agent context small; tail is the useful part
 
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+def _norm(name: str) -> str:
+    """PEP 503 name normalisation."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _spec_name(spec: str) -> str:
+    """'pydantic>=2.0' -> 'pydantic' ; 'requests[socks]==2.31' -> 'requests'."""
+    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
+    return _norm(m.group(1)) if m else ""
+
+
+def _clip(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    return "...[truncated]...\n" + text[-MAX_OUTPUT_CHARS:]
+
+
+def _venv_bin(venv_dir: Path) -> Path:
+    return venv_dir / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _run(cmd: List[str], timeout: int, **kw) -> subprocess.CompletedProcess:
+    """subprocess.run that never raises on timeout / missing binary."""
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, errors="replace", timeout=timeout, **kw
+        )
+    except subprocess.TimeoutExpired as exc:
+        def _s(x):
+            return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
+        return subprocess.CompletedProcess(
+            cmd, 124, _s(exc.stdout), _s(exc.stderr) + f"\nTIMEOUT after {timeout}s"
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(cmd, 127, "", f"{type(exc).__name__}: {exc}")
+
+
+def _result(success: bool, exit_code: int, stage: str, package: str, start: float,
+            **extra: Any) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "success": success,
+        "exit_code": exit_code,
+        "stage": stage,
+        "package_tested": package,
+        "duration_seconds": round(time.monotonic() - start, 2),
+    }
+    out.update(extra)
+    return out
+
+
+def _baseline_requirements(req_file: Path, skip_names: set, dest: Path) -> Optional[Path]:
+    """Copy requirements.txt minus any package the patch is replacing."""
+    if not req_file.is_file():
+        return None
+    kept = []
+    for line in req_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("#", "-")) and _spec_name(stripped) in skip_names:
+            continue
+        kept.append(line)
+    dest.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    return dest
+
+
+def _parse_pytest_counts(text: str) -> Dict[str, int]:
+    counts = {"tests_passed": 0, "tests_failed": 0, "tests_errored": 0}
+    # look at the final summary line, e.g. "== 3 failed, 12 passed, 1 error in 2.1s =="
+    for line in reversed(text.splitlines()):
+        if re.search(r"\b(passed|failed|error|errors)\b", line) and " in " in line:
+            for n, word in re.findall(r"(\d+)\s+(passed|failed|errors?)", line):
+                key = {"passed": "tests_passed", "failed": "tests_failed"}.get(word, "tests_errored")
+                counts[key] = int(n)
+            break
+    return counts
+
+
+# --------------------------------------------------------------------------- #
+# main API
+# --------------------------------------------------------------------------- #
 def run_in_sandbox(
     package_spec: str,
     repo_dir: str = ".",
     extra_packages: Optional[List[str]] = None,
-    timeout: int = 120,
+    timeout: int = 180,
+    requirements_file: str = "requirements.txt",
+    use_baseline: bool = True,
 ) -> Dict[str, Any]:
     """
-    Creates an isolated temporary venv, installs package_spec, runs pytest,
-    and returns a structured dictionary of execution results.
+    Create a temp venv, install `package_spec`, run the repo's pytest suite and
+    return a dict:
+        success, exit_code, stage, package_tested, stdout, stderr,
+        tests_passed/failed/errored, installed_version, warnings, duration_seconds
+    `stage` says where it stopped: create_venv | install_harness |
+    install_baseline | install_package | run_tests.
     """
+    start = time.monotonic()
+    package_spec = (package_spec or "").strip()
+    if not package_spec:
+        return _result(False, 2, "validate_input", package_spec, start,
+                       error="Empty package spec", stdout="", stderr="")
+
     repo_path = Path(repo_dir).resolve()
-    if not repo_path.exists():
-        raise FileNotFoundError(f"Target repository not found: {repo_path}")
+    if not repo_path.is_dir():
+        return _result(False, 2, "validate_input", package_spec, start,
+                       error=f"Target repository not found: {repo_path}", stdout="", stderr="")
 
-    start_time = time.monotonic()
-    temp_dir = tempfile.mkdtemp(prefix="sentinel_sandbox_")
-
+    tmp = Path(tempfile.mkdtemp(prefix="sentinel_sandbox_"))
     try:
-        venv_dir = Path(temp_dir) / "venv"
+        venv_dir = tmp / "venv"
 
-        # 1. Create temporary virtual environment
-        create_venv_cmd = [sys.executable, "-m", "venv", str(venv_dir)]
-        venv_proc = subprocess.run(
-            create_venv_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        if venv_proc.returncode != 0:
-            return {
-                "success": False,
-                "exit_code": venv_proc.returncode,
-                "stage": "create_venv",
-                "package_tested": package_spec,
-                "error": "Failed to create virtual environment",
-                "stdout": venv_proc.stdout,
-                "stderr": venv_proc.stderr,
-                "duration_seconds": round(time.monotonic() - start_time, 2),
-            }
+        # 1. temporary virtual environment
+        p = _run([sys.executable, "-m", "venv", str(venv_dir)], timeout)
+        if p.returncode != 0:
+            return _result(False, p.returncode, "create_venv", package_spec, start,
+                           error="Failed to create virtual environment",
+                           stdout=_clip(p.stdout), stderr=_clip(p.stderr))
 
-        # Determine binary paths for Unix / Windows
-        if os.name == "nt":
-            pip_bin = str(venv_dir / "Scripts" / "pip.exe")
-            python_bin = str(venv_dir / "Scripts" / "python.exe")
-            pytest_bin = str(venv_dir / "Scripts" / "pytest.exe")
-        else:
-            pip_bin = str(venv_dir / "bin" / "pip")
-            python_bin = str(venv_dir / "bin" / "python")
-            pytest_bin = str(venv_dir / "bin" / "pytest")
+        py = str(_venv_bin(venv_dir) / ("python.exe" if os.name == "nt" else "python"))
+        pip = [py, "-m", "pip", "install", "--disable-pip-version-check",
+               "--no-input", "--no-warn-script-location"]
 
-        # 2. Install pytest & core test runner harness into the sandbox
-        install_harness_cmd = [
-            pip_bin,
-            "install",
-            "--quiet",
-            "--no-warn-script-location",
-            "pytest",
-        ]
-        subprocess.run(install_harness_cmd, capture_output=True, text=True, timeout=timeout)
+        # 2. test harness
+        p = _run(pip + ["pytest"], timeout)
+        if p.returncode != 0:
+            return _result(False, p.returncode, "install_harness", package_spec, start,
+                           error="Failed to install pytest into sandbox",
+                           stdout=_clip(p.stdout), stderr=_clip(p.stderr))
 
-        # 3. Install the target package to test
-        pkgs_to_install = [package_spec]
-        if extra_packages:
-            pkgs_to_install.extend(extra_packages)
+        pkgs = [package_spec] + list(extra_packages or [])
 
-        install_pkg_cmd = [
-            pip_bin,
-            "install",
-            "--quiet",
-            "--no-warn-script-location",
-            *pkgs_to_install,
-        ]
-        install_proc = subprocess.run(
-            install_pkg_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-        if install_proc.returncode != 0:
-            return {
-                "success": False,
-                "exit_code": install_proc.returncode,
-                "stage": "install_package",
-                "package_tested": package_spec,
-                "error": f"Failed to install package '{package_spec}'",
-                "stdout": install_proc.stdout,
-                "stderr": install_proc.stderr,
-                "duration_seconds": round(time.monotonic() - start_time, 2),
-            }
-
-        # Also install any other remaining project requirements so the rest of LinkWatch works
-        req_file = repo_path / "requirements.txt"
-        if req_file.exists():
-            subprocess.run(
-                [pip_bin, "install", "--quiet", "--no-warn-script-location", "-r", str(req_file)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+        # 3a. baseline project deps (minus whatever the patch replaces)
+        if use_baseline:
+            base = _baseline_requirements(
+                repo_path / requirements_file, {_spec_name(s) for s in pkgs}, tmp / "baseline.txt"
             )
+            if base is not None:
+                p = _run(pip + ["-r", str(base)], timeout)
+                if p.returncode != 0:
+                    return _result(False, p.returncode, "install_baseline", package_spec, start,
+                                   error=f"Failed to install baseline deps from {requirements_file}",
+                                   stdout=_clip(p.stdout), stderr=_clip(p.stderr))
 
-        # 4. Run LinkWatch pytest suite in the sandbox
-        tests_dir = repo_path / "tests"
+        # 3b. the package under test, installed LAST so it wins
+        p = _run(pip + pkgs, timeout)
+        if p.returncode != 0:
+            return _result(False, p.returncode, "install_package", package_spec, start,
+                           error=f"Failed to install package '{package_spec}'",
+                           stdout=_clip(p.stdout), stderr=_clip(p.stderr))
+
+        # which version actually landed?
+        installed_version = None
+        v = _run([py, "-m", "pip", "show", _spec_name(package_spec)], 60)
+        m = re.search(r"^Version:\s*(\S+)", v.stdout, re.M)
+        if m:
+            installed_version = m.group(1)
+
+        # 4. run LinkWatch test-suite inside the venv
         env = os.environ.copy()
         env["PYTHONPATH"] = str(repo_path)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        tests_dir = repo_path / "tests"
+        target = str(tests_dir) if tests_dir.is_dir() else str(repo_path)
+        t = _run([py, "-m", "pytest", target, "-v", "--tb=short", "-p", "no:cacheprovider"],
+                 timeout, cwd=str(repo_path), env=env)
 
-        test_cmd = [pytest_bin, str(tests_dir), "-v", "--tb=short"]
-        test_proc = subprocess.run(
-            test_cmd,
-            cwd=str(repo_path),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        # 5. structured result
+        warnings = []
+        for line in (t.stdout + "\n" + t.stderr).splitlines():
+            low = line.lower()
+            if ("warning" in low or "deprecat" in low) and line.strip() not in warnings:
+                warnings.append(line.strip())
+
+        return _result(
+            t.returncode == 0, t.returncode, "run_tests", package_spec, start,
+            installed_version=installed_version,
+            warnings_count=len(warnings), warnings=warnings[:5],
+            stdout=_clip(t.stdout), stderr=_clip(t.stderr),
+            **_parse_pytest_counts(t.stdout),
         )
-
-        total_duration = round(time.monotonic() - start_time, 2)
-        stdout = test_proc.stdout
-        stderr = test_proc.stderr
-        exit_code = test_proc.returncode
-
-        # Parse test metrics
-        passed = 0
-        failed = 0
-        errors = 0
-        warnings_list = []
-
-        pass_m = re.search(r"(\d+)\s+passed", stdout)
-        if pass_m:
-            passed = int(pass_m.group(1))
-
-        fail_m = re.search(r"(\d+)\s+failed", stdout)
-        if fail_m:
-            failed = int(fail_m.group(1))
-
-        err_m = re.search(r"(\d+)\s+error", stdout)
-        if err_m:
-            errors = int(err_m.group(1))
-
-        for line in stdout.splitlines() + stderr.splitlines():
-            if "warning" in line.lower() or "deprecation" in line.lower():
-                cleaned = line.strip()
-                if cleaned and cleaned not in warnings_list:
-                    warnings_list.append(cleaned)
-
-        return {
-            "success": exit_code == 0,
-            "exit_code": exit_code,
-            "stage": "run_tests",
-            "package_tested": package_spec,
-            "tests_passed": passed,
-            "tests_failed": failed,
-            "tests_errored": errors,
-            "warnings_count": len(warnings_list),
-            "warnings": warnings_list[:5],
-            "stdout": stdout,
-            "stderr": stderr,
-            "duration_seconds": total_duration,
-        }
-
+    except Exception as exc:  # never crash the agent
+        return _result(False, 1, "sandbox_internal_error", package_spec, start,
+                       error=f"{type(exc).__name__}: {exc}", stdout="", stderr="")
     finally:
-        # 5. Clean up temporary directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)  # always clean up the temp venv
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Hermes Agent Sandbox Tool — Tests a Python package in an isolated temporary venv."
-    )
-    parser.add_argument(
-        "--package",
-        required=True,
-        help="Package name and version to test (e.g. 'requests==2.31.0', 'platformdirs>=4.0.0')",
-    )
-    parser.add_argument(
-        "--repo",
-        default=".",
-        help="Path to the target repository (default: current directory)",
-    )
-    parser.add_argument(
-        "--extra",
-        nargs="*",
-        default=[],
-        help="Extra packages to install alongside the target package",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output raw JSON format for agent consumption",
-    )
-    args = parser.parse_args()
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Test a Python package patch in an isolated temp venv.")
+    ap.add_argument("--package", required=True, help="e.g. 'requests==2.31.0' or 'pydantic>=2.0.0'")
+    ap.add_argument("--repo", default=".", help="path to target repo (default: .)")
+    ap.add_argument("--extra", nargs="*", default=[], help="extra packages to install together")
+    ap.add_argument("--timeout", type=int, default=180, help="seconds per step (default 180)")
+    ap.add_argument("--no-baseline", action="store_true", help="skip installing requirements.txt")
+    ap.add_argument("--json", action="store_true", help="print raw JSON")
+    a = ap.parse_args()
 
-    result = run_in_sandbox(
-        package_spec=args.package,
-        repo_dir=args.repo,
-        extra_packages=args.extra,
-    )
+    res = run_in_sandbox(a.package, a.repo, a.extra, a.timeout, use_baseline=not a.no_baseline)
 
-    if args.json:
-        print(json.dumps(result, indent=2))
+    if a.json:
+        print(json.dumps(res, indent=2))
     else:
-        status_symbol = "🟢 SUCCESS" if result["success"] else "🔴 FAILURE"
-        print(f"\n🧪 [Sandbox Verification] Package: {result['package_tested']} → {status_symbol}")
-        print(f"⏱️ Duration: {result['duration_seconds']}s | Exit Code: {result['exit_code']}")
-        if "tests_passed" in result:
-            print(f"📊 Passed: {result['tests_passed']} | Failed: {result['tests_failed']} | Errors: {result['tests_errored']}")
-            if result.get("warnings"):
-                print(f"⚠️ Warnings ({result['warnings_count']}):")
-                for w in result["warnings"]:
-                    print(f"   • {w}")
-        if not result["success"]:
-            print("\n📋 Error Details:")
-            print(result.get("error") or result.get("stderr") or result.get("stdout", "")[:500])
+        print(f"\n[Sandbox] {res['package_tested']} -> {'SUCCESS' if res['success'] else 'FAILURE'}")
+        print(f"stage={res['stage']}  exit_code={res['exit_code']}  time={res['duration_seconds']}s")
+        if "tests_passed" in res:
+            print(f"passed={res['tests_passed']} failed={res['tests_failed']} errors={res['tests_errored']}"
+                  f"  installed={res.get('installed_version')}")
+        if not res["success"]:
+            print("\n--- details ---")
+            print(res.get("error") or "", (res.get("stderr") or res.get("stdout") or "")[-1500:])
+    return 0 if res["success"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
