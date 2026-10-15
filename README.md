@@ -1,227 +1,162 @@
-<div align="center">
+# 🛡️ ResilienceSentinel: Autonomous Dependency Maintenance Skill
 
-# 🔭 linkwatch
-
-**Keep an eye on your websites from the terminal.**
-
-A small, friendly link & uptime checker: list your sites in one file, run one command,
-and get a live status table plus a clean HTML status page you can host anywhere.
-
-![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
-![Interface](https://img.shields.io/badge/interface-CLI-4B4B4B?logo=gnubash&logoColor=white)
-![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-green)
-
-[Quick start](#-quick-start) •
-[Usage](#-usage) •
-[Configuration](#%EF%B8%8F-configuration) •
-[How it works](#-how-it-works) •
-[Tests](#-running-the-tests)
-
-</div>
+> **Hacktober Hack Day Mumbai × ISTE KJSSE 2026**  
+> **Track:** Track 2 — Maintenance Agent Skill  
+> **Team:** JVSS  
+> **Standard:** [Agent Skills Open Standard (agentskills.io)](https://agentskills.io)  
+> **Target Repository:** [rishrek/LinkWatch](https://github.com/rishrek/LinkWatch)  
+> **License:** MIT / Apache-2.0  
 
 ---
 
-## ✨ Features
+## 📋 1. Problem & Solution Overview
 
-- 📋 **One config file**: list every site you care about in `sites.toml`
-- ⚡ **Live terminal table**: watch results fill in as each site is checked
-- 🟢 **Clear status**: UP/DOWN, HTTP status code, response time and page title
-- 🕒 **Last-Modified tracking**: see when a page was last updated (when the server reports it)
-- 💾 **Cached results**: the last run is saved, so you can build reports any time
-- 🌐 **HTML status page**: one command turns your results into a shareable `status.html`
-- 🐳 **Docker ready**: run everything without touching your local Python
+### The Problem
+Open-source software rot is a pervasive problem. Maintainers frequently discover dependency decay only after production systems break. In the organizer-provided target repository (`LinkWatch`), several critical dependency traps were identified:
+- **`appdirs==1.4.4`**: Abandoned since May 2017; fails modern OS directory specifications.
+- **`toml==0.10.2`**: Unmaintained third-party dependency; superseded by Python 3.11+ built-in `tomllib`.
+- **`pkg_resources` (`setuptools==75.8.0`)**: Deprecated API emitting runtime deprecation warnings and causing slow startup overhead.
+- **`six`**: Dead-weight legacy Python 2 compatibility shim declared in requirements but never imported.
+- **`nose==1.3.7`**: Broken dev test runner that crashes fatally on Python 3.12+ due to the permanent removal of the `imp` module.
+- **Pydantic v1 Syntax**: `@validator` and `class Config` patterns deprecated in Pydantic v2.
+
+### The Solution: ResilienceSentinel
+**ResilienceSentinel** is an autonomous software maintenance capability built for **Hermes Agent** following the **Agent Skills Open Standard** (`agentskills.io`). It empowers AI agents to:
+1. Dynamically inspect dependencies and locate call sites via Abstract Syntax Tree (AST) parsing.
+2. Execute sandboxed dual-run tests (`pytest`) before and after migration.
+3. Automatically apply verified replacement recipes.
+4. Generate a standardized **Dependency Exit Capsule** that strictly separates verified deterministic evidence from AI strategic recommendations.
 
 ---
 
-## 🖥️ Preview
+## 🏗️ 2. Architecture & 5-Phase Workflow
 
-```text
-$ python -m linkwatch.cli check
-                                    My sites
-┏━━━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Site    ┃ Status ┃ Code ┃   Time ┃ Title                           ┃
-┡━━━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ Python  │ UP     │  200 │ 113 ms │ Welcome to Python.org           │
-│ PyPI    │ UP     │  200 │  59 ms │ PyPI · The Python Package Index │
-│ Example │ UP     │  200 │ 204 ms │ Example Domain                  │
-│ GitHub  │ UP     │  200 │ 236 ms │ GitHub                          │
-└─────────┴────────┴──────┴────────┴─────────────────────────────────┘
-4/4 sites up, results saved to ~/.cache/linkwatch/results.json
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 Hermes Agent (Nous Research)                │
+│       Loads skill via Agent Skills Open Standard (SKILL.md)  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+┌───────────────────────────────┐   ┌───────────────────────────┐
+│     resilience-sentinel/      │   │         scripts/          │
+│   • SKILL.md (instructions)   │   │  • scan_ast.py            │
+│   • references/               │   │  • sandbox_test.py        │
+│     - appdirs_to_platformdirs │   │  • apply_migration.py     │
+│     - toml_to_tomllib         │   │  • build_capsule.py       │
+│     - pkg_resources_to_import │   └─────────────┬─────────────┘
+└───────────────────────────────┘                 │
+                                                  ▼
+                                    ┌───────────────────────────┐
+                                    │    Target: LinkWatch      │
+                                    │  • Phase 1: AST Scan      │
+                                    │  • Phase 2: Baseline Test │
+                                    │  • Phase 3: Patch Applied │
+                                    │  • Phase 4: Verified Pass │
+                                    │  • Phase 5: Exit Capsule  │
+                                    └───────────────────────────┘
 ```
 
 ---
 
-## 🚀 Quick start
+## 🚀 3. Setup Instructions
 
-You only need **one** of the two options below.
-
-### Option A: Docker (no Python setup needed)
-
+### Option A: Local Standalone Setup (Quickest)
 ```bash
-git clone https://github.com/rishrek/linkwatch.git
-cd linkwatch
-make docker-build
-docker run --rm -it linkwatch python -m linkwatch.cli check
+# 1. Clone repository
+git clone https://github.com/vivs24307-maker/H26_JVSS_ResilienceSentinel.git
+cd H26_JVSS_ResilienceSentinel
+
+# 2. Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements-sentinel.txt
 ```
 
-### Option B: Local Python 3.12
-
+### Option B: Hermes Agent Integration (Agent Skills Standard)
 ```bash
-git clone https://github.com/rishrek/linkwatch.git
-cd linkwatch
-make setup                    # creates .venv and installs everything (one time)
-source .venv/bin/activate     # do this in every new terminal
-python -m linkwatch.cli check
+# 1. Install Hermes Agent
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+
+# 2. Install skill into Hermes skills directory
+mkdir -p ~/.hermes/skills/
+cp -r resilience-sentinel/ ~/.hermes/skills/
+
+# 3. Verify Hermes sees the skill
+hermes skills list
+# Output: resilience-sentinel (v1.0.0)
 ```
-
-<details>
-<summary><b>On Windows, or without <code>make</code>?</b></summary>
-
-```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt -r requirements-dev.txt
-python -m linkwatch.cli check
-```
-
-If your Python 3.12 has a different name on macOS/Linux, pass it to make:
-`make setup PYTHON=/path/to/python3.12`
-
-</details>
 
 ---
 
-## 📖 Usage
+## 💻 4. Usage Instructions
 
-| Command | What it does |
-|---------|--------------|
-| `python -m linkwatch.cli check` | Checks every site, shows the live table and saves the results |
-| `python -m linkwatch.cli report` | Builds `status.html` from the last saved results |
-| `python -m linkwatch.cli info` | Shows where the templates and cached results live |
-| `python -m linkwatch.cli --help` | Lists all commands and options |
-
-### Options
-
-| Command | Option | Default | Description |
-|---------|--------|---------|-------------|
-| `check` | `--config PATH` | `sites.toml` | Use a different sites file |
-| `report` | `-o, --output PATH` | `status.html` | Where to write the HTML page |
-| `report` | `--title TEXT` | `linkwatch` | Heading shown on the status page |
-
-### A typical session
-
+### One-Command Full Workflow Runner:
 ```bash
-python -m linkwatch.cli check                     # 1. check your sites
-python -m linkwatch.cli report -o status.html     # 2. build the status page
-open status.html                                  # 3. view it (xdg-open on Linux)
+python run_sentinel.py --repo .
 ```
+This runs the full 5-phase lifecycle:
+- 🔍 **Phase 1:** AST Discovery of all dependencies and exact file:line references.
+- 🧪 **Phase 2:** Sandboxed baseline test run (records failures/warnings).
+- 🚀 **Phase 3:** Automated patch application with pre-migration backup.
+- 🟢 **Phase 4:** Post-migration verification run (ensures 10/10 tests pass, 0 warnings).
+- 📦 **Phase 5:** Generates `capsules/DEPENDENCY_EXIT_CAPSULE.md`.
 
----
-
-## ⚙️ Configuration
-
-All sites live in **`sites.toml`** in the project folder:
-
-```toml
-title = "My sites"
-
-[[sites]]
-name = "Python"
-url = "https://www.python.org"
-
-[[sites]]
-name = "Example"
-url = "https://example.com"
-```
-
-| Key | Required | Description |
-|-----|----------|-------------|
-| `title` | no | Heading shown above the terminal table |
-| `[[sites]]` | yes | One block per site you want to check |
-| `name` | yes | Short label for the site |
-| `url` | yes | Full address, must start with `http://` or `https://` |
-
-To add a site, copy a `[[sites]]` block and change the name and URL.
-
-### Where results are stored
-
-| System | Location |
-|--------|----------|
-| macOS | `~/Library/Caches/linkwatch/results.json` |
-| Linux | `~/.cache/linkwatch/results.json` |
-| Windows | `%LOCALAPPDATA%\linkwatch\linkwatch\Cache\results.json` |
-
-Set the `LINKWATCH_CACHE_DIR` environment variable to keep results somewhere else.
-
----
-
-## 🧠 How it works
-
-```mermaid
-flowchart LR
-    A["sites.toml"] -->|"check"| B["Live table in terminal"]
-    A -->|"check"| C[("results.json cache")]
-    C -->|"report"| D["status.html"]
-```
-
-1. **Load**: `sites.toml` is read and validated (every site needs a name and a valid URL).
-2. **Check**: each site gets an HTTP GET request, and linkwatch records the status code, response time, page title and `Last-Modified` header.
-3. **Save**: results are written as JSON to your cache folder.
-4. **Report**: the saved results are rendered into a standalone HTML page with a summary of what's up and what's down.
-
-### Project structure
-
-```text
-linkwatch/
-├── linkwatch/
-│   ├── cli.py            # commands: check, report, info
-│   ├── config.py         # reads and validates sites.toml
-│   ├── checker.py        # visits each site and collects results
-│   ├── encoding.py       # page charset detection and title extraction
-│   ├── dates.py          # Last-Modified parsing
-│   ├── http_patch.py     # default request headers
-│   ├── cache.py          # saves and loads results.json
-│   ├── report.py         # builds the HTML status page
-│   ├── resources.py      # locates the bundled templates
-│   └── templates/
-│       └── status.html.j2
-├── tests/                # pytest suite with a tiny local test server
-├── sites.toml            # your list of sites
-├── requirements.txt      # app dependencies
-├── requirements-dev.txt  # test dependencies
-├── Dockerfile
-└── Makefile
-```
-
----
-
-## 🧪 Running the tests
-
-The tests start a tiny local web server, so they don't depend on real websites.
-
+### Preview Scan Only (Dry Run):
 ```bash
-make test            # locally (activate .venv first)
-make docker-test     # inside Docker (run make docker-build first)
+python run_sentinel.py --repo . --dry-scan
 ```
 
-### Make targets
+### Rollback Migration:
+```bash
+python run_sentinel.py --repo . --rollback
+```
 
-| Target | Description |
-|--------|-------------|
-| `make setup` | Create `.venv` and install all dependencies |
-| `make test` | Run the pytest suite |
-| `make test-nose` | Run the suite with nose |
-| `make docker-build` | Build the Docker image |
-| `make docker-test` | Run the tests inside Docker |
+### Run Autonomous via Hermes Agent:
+```bash
+hermes "Use the resilience-sentinel skill to audit and migrate dependencies in this repository and produce the Dependency Exit Capsule."
+```
 
 ---
 
-## 🤝 Contributing
+## 📦 5. Key Deliverable: The Dependency Exit Capsule
 
-Ideas, bug reports and pull requests are welcome. Fork the repo, create a branch,
-and open a PR. Please run `make test` before submitting.
+The generated capsule is located at [`capsules/DEPENDENCY_EXIT_CAPSULE.md`](capsules/DEPENDENCY_EXIT_CAPSULE.md).
 
-## 📄 License
+It strictly enforces the evaluation criterion:
+- **SECTION A (Verified Repository Evidence):**
+  - AST Locations: `linkwatch/cache.py:4`, `linkwatch/config.py:3`, `linkwatch/resources.py:1`.
+  - Baseline Test: Exit code `4` (FAIL - missing/deprecated module).
+  - Post-Migration Test: Exit code `0` (PASS - **10 passed in 6.73s, 0 warnings**).
+  - Complete unified `git diff` for all modified files.
+- **SECTION B (AI Strategic Analysis):**
+  - Model reasoning on why `platformdirs` and `tomllib` were selected.
+  - Trade-off analysis (e.g. `tomllib` read-only characteristics).
+  - Unresolved considerations.
 
-Released under the [MIT License](LICENSE).
+---
+
+## 🤖 6. AI Model Details
+
+In strict compliance with the hackathon rules prohibiting paid cloud APIs:
+
+| Attribute | Details |
+|:---|:---|
+| **Model Name** | Hermes 3 |
+| **Model Version** | Hermes-3-Llama-3.1-8B |
+| **Model Source** | Nous Research ([nousresearch.com](https://nousresearch.com)) |
+| **Access Method** | Local offline inference via Ollama (`localhost:11434`) |
+| **Model License** | MIT / Permissive Open-Weights |
+| **Role in Project** | Strategic dependency analysis, trade-off evaluation, migration guidance, and capsule synthesis |
+
+---
+
+## ⚠️ 7. Known Limitations & Forward Considerations
+
+1. **Read-Only TOML:** Python standard library `tomllib` only reads TOML. If `LinkWatch` requires runtime programmatic writing to `sites.toml`, `tomli-w` should be incorporated.
+2. **Python Version Compatibility:** `tomllib` is built-in for Python >= 3.11. For legacy environments running Python 3.10 or earlier, the fallback `tomli` package must be installed.
+3. **Pydantic Config Migration:** Modernized to Pydantic v2 `ConfigDict` and `@field_validator`; backward compatibility with Pydantic v1.x requires `pydantic.v1` import shims.
+4. **CharDet vs. Charset-Normalizer:** `chardet` is LGPL licensed; future iterations can migrate to `charset-normalizer` (MIT) for faster parsing and permissible licensing.

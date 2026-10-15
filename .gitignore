@@ -1,9 +1,11 @@
+.venv/
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
 *.egg-info/
-build/
 dist/
-.venv/
-venv/
-status.html
+build/
+.eggs/
+target_repo_backup_pre_migration/
+*.html

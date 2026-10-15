@@ -1,7 +1,7 @@
 import json
 import os
 
-from appdirs import user_cache_dir
+from platformdirs import user_cache_dir
 
 RESULTS_FILE = "results.json"
 

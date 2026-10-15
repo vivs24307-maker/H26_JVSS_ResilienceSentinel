@@ -1,2 +1,2 @@
 pytest
-nose==1.3.7
+# nose removed: deprecated and incompatible with Python 3.12+ (imp module deleted)
